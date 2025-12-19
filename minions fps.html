@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Minion FPS - Fixed Joystick</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; touch-action: none; font-family: sans-serif; }
+        #menu { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, #440066 0%, #110022 100%); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10000; color: white; text-align: center; }
+        #menu h1 { color: #ffdb00; font-size: 3rem; margin-bottom: 10px; text-shadow: 0 0 20px #ffdb00; }
+        #start-btn { padding: 15px 40px; font-size: 1.5rem; font-weight: bold; background: #ffdb00; color: #220033; border: none; border-radius: 50px; cursor: pointer; }
+        #ui, #lives-ui { position: absolute; top: 15px; color: #fff; font-size: 20px; z-index: 50; display: none; text-shadow: 2px 2px #000; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 10px; }
+        #ui { left: 20px; } #lives-ui { right: 20px; color: #ff0055; font-weight: bold; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 14px; height: 14px; border: 2px solid #0ff; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; z-index: 50; display: none; }
+        #joystick-zone { position: absolute; bottom: 30px; left: 30px; width: 120px; height: 120px; z-index: 100; display: none; }
+        #fire-button { position: absolute; bottom: 40px; right: 40px; width: 100px; height: 100px; background: radial-gradient(circle, #00ffff 0%, #008b8b 100%); border: 4px solid #fff; border-radius: 50%; z-index: 1000; display: none; align-items: center; justify-content: center; color: white; font-weight: bold; user-select: none; }
+        #damage-flash { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2000; opacity: 0; transition: opacity 0.1s; background: rgba(255, 0, 0, 0.5); }
+    </style>
+</head>
+<body>
+
+    <div id="menu">
+        <h1>MINION FPS</h1>
+        <p>Controles Corrigidos: Frente é Frente!</p>
+        <button id="start-btn">JOGAR</button>
+    </div>
+
+    <div id="damage-flash"></div>
+    <div id="ui">Curados: <span id="score">0</span></div>
+    <div id="lives-ui"> <span id="lives">3</span></div>
+    <div id="crosshair"></div>
+    <div id="joystick-zone"></div>
+    <div id="fire-button">ATIRAR</div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        let gameStarted = false, score = 0, lives = 3, pitch = 0, yaw = 0, gamepadCanFire = true;
+        let inputMove = { x: 0, y: 0 }; // Centraliza o input (Touch ou Gamepad)
+        const projectiles = [], enemies = [], healedMinions = [];
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0515);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+        const light = new THREE.DirectionalLight(0xffffff, 1.2);
+        light.position.set(5, 15, 5); light.castShadow = true; scene.add(light);
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+        floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+        
+        function wall(x, z, r) {
+            const w = new THREE.Mesh(new THREE.PlaneGeometry(60, 15), new THREE.MeshStandardMaterial({ color: 0x9d00ff, emissive: 0xbc13fe, emissiveIntensity: 1, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+            w.position.set(x, 7.5, z); w.rotation.y = r; scene.add(w);
+        }
+        wall(0, -30, 0); wall(0, 30, Math.PI); wall(-30, 0, Math.PI/2); wall(30, 0, -Math.PI/2);
+
+        const player = new THREE.Group();
+        player.position.set(0, 1.6, 0); scene.add(player); player.add(camera);
+
+        const loader = new GLTFLoader();
+        let evilBase, goodBase;
+        function prep(gltf, isP) {
+            const m = gltf.scene;
+            const s = new THREE.Box3().setFromObject(m).getSize(new THREE.Vector3()).y;
+            m.scale.setScalar(1.3 / s); if(isP) evilBase = m; else goodBase = m;
+        }
+        loader.load('evil_minion.glb', g => prep(g, true));
+        loader.load('minion.glb', g => prep(g, false));
+
+        function fire() {
+            if(!gameStarted) return;
+            const j = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 3 }));
+            j.position.copy(player.position);
+            const dir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+            j.userData.vel = dir.multiplyScalar(1.2);
+            scene.add(j); projectiles.push(j);
+        }
+
+        // Touch Camera
+        let touchStartX, touchStartY;
+        window.addEventListener('touchstart', e => {
+            const touch = e.touches[0];
+            if (touch.clientX > window.innerWidth / 2) { 
+                touchStartX = touch.clientX; touchStartY = touch.clientY;
+            }
+        });
+        window.addEventListener('touchmove', e => {
+            const touch = e.touches[0];
+            if (touch.clientX > window.innerWidth / 2) {
+                const dx = touch.clientX - touchStartX;
+                const dy = touch.clientY - touchStartY;
+                yaw -= dx * 0.005; pitch -= dy * 0.005;
+                pitch = Math.max(-1.4, Math.min(1.4, pitch));
+                touchStartX = touch.clientX; touchStartY = touch.clientY;
+                player.rotation.y = yaw; camera.rotation.x = pitch;
+            }
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(!gameStarted) return;
+
+            let moveX = inputMove.x;
+            let moveY = inputMove.y; // Já corrigido no nipplejs agora
+
+            // Gamepad Overwrite
+            const gp = navigator.getGamepads()[0];
+            if (gp) {
+                if (Math.abs(gp.axes[0]) > 0.15) moveX = gp.axes[0];
+                if (Math.abs(gp.axes[1]) > 0.15) moveY = -gp.axes[1]; // Invertido para gamepad
+                if (Math.abs(gp.axes[2]) > 0.15 || Math.abs(gp.axes[3]) > 0.15) {
+                    yaw -= gp.axes[2] * 0.04; pitch -= gp.axes[3] * 0.04;
+                    pitch = Math.max(-1.4, Math.min(1.4, pitch));
+                    player.rotation.y = yaw; camera.rotation.x = pitch;
+                }
+                const btn = gp.buttons[0].pressed || gp.buttons[7].pressed;
+                if (btn && gamepadCanFire) { fire(); gamepadCanFire = false; }
+                if (!btn) gamepadCanFire = true;
+            }
+
+            // Aplicar Movimento (Y positivo no joystick = andar no -Z da cena)
+            const mv = new THREE.Vector3(moveX, 0, -moveY).applyQuaternion(player.quaternion);
+            player.position.add(mv.multiplyScalar(0.2));
+
+            // Lógica de jogo (inimigos, tiros, fuga)
+            const t = Date.now() * 0.008;
+            enemies.forEach((e, i) => {
+                const d = new THREE.Vector3().subVectors(player.position, e.position).normalize();
+                e.position.x += d.x * 0.08; e.position.z += d.z * 0.08;
+                e.rotation.y = Math.atan2(d.x, d.z);
+                e.position.y = 0.6 + Math.abs(Math.cos(t + i)) * 0.15;
+                if(e.position.distanceTo(player.position) < 1.4) {
+                    lives--; document.getElementById('lives').innerText = lives;
+                    document.getElementById('damage-flash').style.opacity = "1";
+                    setTimeout(()=>document.getElementById('damage-flash').style.opacity="0", 150);
+                    scene.remove(e); enemies.splice(i, 1);
+                    if(lives <= 0) location.reload();
+                }
+            });
+
+            for(let i=projectiles.length-1; i>=0; i--) {
+                const p = projectiles[i]; p.position.add(p.userData.vel);
+                enemies.forEach((e, ei) => {
+                    if(p.position.distanceTo(e.position) < 1.3) {
+                        const h = goodBase.clone(); h.position.set(e.position.x, 0.6, e.position.z);
+                        let esc = new THREE.Vector3().subVectors(e.position, player.position).normalize();
+                        esc.y = 0; h.userData.esc = esc;
+                        h.rotation.set(0, 0, 0); h.lookAt(new THREE.Vector3().addVectors(h.position, esc));
+                        scene.add(h); healedMinions.push(h);
+                        scene.remove(e); enemies.splice(ei, 1);
+                        scene.remove(p); projectiles.splice(i, 1);
+                        score++; document.getElementById('score').innerText = score;
+                    }
+                });
+                if(p && p.position.length() > 50) { scene.remove(p); projectiles.splice(i, 1); }
+            }
+
+            healedMinions.forEach((h, i) => {
+                h.position.add(h.userData.esc.clone().multiplyScalar(0.45));
+                h.rotation.x = 0; h.rotation.z = Math.sin(Date.now() * 0.02) * 0.2;
+                h.position.y = 0.6 + Math.abs(Math.cos(Date.now() * 0.02)) * 0.15;
+                if(h.position.length() > 55) { scene.remove(h); healedMinions.splice(i, 1); }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        document.getElementById('start-btn').addEventListener('click', () => {
+            document.getElementById('menu').style.display = 'none';
+            ['ui', 'lives-ui', 'crosshair', 'joystick-zone', 'fire-button'].forEach(id => document.getElementById(id).style.display = 'block');
+            gameStarted = true;
+        });
+
+        // JOYSTICK TOUCH CORRIGIDO
+        const joy = nipplejs.create({ 
+            zone: document.getElementById('joystick-zone'), 
+            mode: 'static', 
+            position: {left: '60px', bottom: '60px'}, 
+            color: 'cyan', 
+            size: 100 
+        });
+        
+        // No nipplejs, o vetor.y é positivo para cima por padrão.
+        // Vamos passar exatamente como o motor espera.
+        joy.on('move', (e, d) => { 
+            inputMove = { x: d.vector.x, y: d.vector.y }; 
+        });
+        joy.on('end', () => { inputMove = { x: 0, y: 0 }; });
+
+        document.getElementById('fire-button').addEventListener('touchstart', (e) => { e.preventDefault(); fire(); });
+
+        setInterval(() => { if(gameStarted && evilBase) {
+            const a = Math.random() * Math.PI * 2;
+            const m = evilBase.clone(); m.position.set(Math.cos(a)*25, 0.6, Math.sin(a)*25);
+            scene.add(m); enemies.push(m);
+        }}, 2500);
+
+        animate();
+    </script>
+</body>
+</html>
